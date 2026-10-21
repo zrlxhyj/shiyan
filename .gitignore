@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+.pytest_cache/
+third_party/
+data/
+runs/
+results/
+*.pt
+*.pth
+
+# Local credentials and generated machine-specific files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/checks/all_method_configs/
+/checks/native_smoke.json
+/experiment_jobs/commands.json

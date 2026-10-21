@@ -1,0 +1,1 @@
+"""fedavgm training entry point."""

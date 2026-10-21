@@ -1,0 +1,1 @@
+"""fedadam training entry point."""
