@@ -79,3 +79,31 @@ def test_interrupted_resume_is_identical(tmp_path,monkeypatch):
     actual=torch.load(folder/'last.pt',weights_only=False)['model']
     for n,v in expected.items(): torch.testing.assert_close(v,actual[n],rtol=0,atol=0)
     assert len((folder/'rounds.jsonl').read_text().splitlines())==3
+
+
+@pytest.mark.parametrize('method',['fedavg','feddecouple'])
+def test_paired_diagnostics_full_loop_preserves_checkpoints_and_exports(tmp_path,monkeypatch,method):
+    from dataclasses import replace
+    from feddecouple.mechanism import export
+    from tests.test_diagnostics import assert_nested
+    import csv
+    manifest=make_fixture(tmp_path,monkeypatch)
+    cfg=Config(method=method,device='cpu',image_size=8,batch_size=2,rounds=2,local_epochs=1,
+               manifest=str(manifest),output=str(tmp_path/'off'),persistent_optimizer=True)
+    off=run(cfg)
+    on=run(replace(cfg,diagnostic_every=1,output=str(tmp_path/'on')))
+    a=torch.load(off/'last.pt',weights_only=False);b=torch.load(on/'last.pt',weights_only=False)
+    for key in ('model','opt_states','bn_states'):
+        assert_nested(a[key],b[key])
+    assert export(on)==(12,2)
+    rows=[json.loads(x) for x in (on/'rounds.jsonl').read_text().splitlines()]
+    assert all(r['diagnostics']['sampled_steps']==6 for r in rows)
+    assert all(r['steps']==6 for r in rows)
+    with (on/'diagnostic_samples.csv').open(encoding='utf-8-sig') as f:
+        samples=list(csv.DictReader(f))
+    assert all(r['diagnostic_actual_branch']==('original' if method=='fedavg' else 'probed') for r in samples)
+    assert len({r['diagnostic_sample_id'] for r in samples})==12
+    with (on/'diagnostic_trajectory_pairs.csv').open(encoding='utf-8-sig') as f:
+        paired=list(csv.DictReader(f))
+    assert paired[0]['next_dispersion']!='' and paired[1]['next_dispersion']==''
+    assert paired[0]['participant_jaccard']==''

@@ -84,6 +84,10 @@ class Config:
             raise ValueError('Invalid client count/participation')
         if min(self.rounds, self.local_epochs, self.batch_size, self.eval_every) < 1:
             raise ValueError('Budgets must be positive')
+        if self.diagnostic_every < 0:
+            raise ValueError('diagnostic_every must be nonnegative')
+        if self.diagnostic_every and self.method not in ('fedavg','feddecouple'):
+            raise ValueError('Paired mechanism diagnostics currently support fedavg and feddecouple only')
         if self.rho < 0 or self.lr <= 0 or self.temperature <= 0 or self.smooth_l1_beta <= 0:
             raise ValueError('Invalid optimizer/proximal settings')
         if not 0 < self.server_min <= self.server_lr <= self.server_max:

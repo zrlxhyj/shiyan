@@ -5,6 +5,10 @@ third_party/
 data/
 runs/
 results/
+datasets/
+figures/
+/checks/diagnostic_smoke.json
+/checks/noniid_alpha0p1_candidate/
 *.pt
 *.pth
 

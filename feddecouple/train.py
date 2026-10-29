@@ -84,6 +84,7 @@ def run(cfg, resume=False):
         if cfg.device.startswith('cuda'): torch.cuda.reset_peak_memory_stats()
         global_state=snapshot(model,cpu=True)
         states=[]; sizes=[]; losses=[]; steps_total=0; diagnostics_seconds=0.
+        diagnostic_samples=[]
         updates_c=[]
         for client_id in schedule[round_id]:
             # Identical per-client data, augmentation and dropout RNG across methods.
@@ -95,7 +96,7 @@ def run(cfg, resume=False):
                 if name.endswith('num_batches_tracked'): b.zero_()
             rule=METHODS[cfg.method][0]
             teacher=None
-            if rule not in ('plain','hyper_local','scaffold','sam'):
+            if rule not in ('plain','hyper_local','scaffold','sam') or cfg.diagnostic_every:
                 teacher=copy.deepcopy(student).eval()
                 teacher.requires_grad_(False)
             student.train()
@@ -129,6 +130,15 @@ def run(cfg, resume=False):
                     diagnostic=bool(cfg.diagnostic_every and steps%cfg.diagnostic_every==0)
                     row=one_step(student,teacher,criterion,optimizer,images,targets,cfg,(global_c,ci),diagnostic)
                     row.update(round=round_id,client=client_id,epoch=epoch,step=steps,local_lr=optimizer.param_groups[0]['lr'])
+                    if diagnostic:
+                        image_ids=[int(t['image_id'].item()) for t in targets]
+                        row.update(diagnostic_image_ids=image_ids,diagnostic_seed=cfg.seed,
+                                   diagnostic_method=cfg.method,diagnostic_manifest_sha256=manifest_hash,
+                                   diagnostic_client_images=len(dataset),diagnostic_client_planned_steps=total_steps,
+                                   diagnostic_participants=schedule[round_id])
+                        identity=f'{cfg.seed}:{round_id}:{client_id}:{epoch}:{steps}:{row["diagnostic_input_sha256"]}'
+                        row['diagnostic_sample_id']=hashlib.sha256(identity.encode()).hexdigest()
+                        diagnostic_samples.append(row)
                     append_json(folder/'steps.jsonl',row)
                     diagnostics_seconds+=row.get('diagnostic_seconds',0)
                     if hyper:
@@ -160,6 +170,9 @@ def run(cfg, resume=False):
             del student,teacher,optimizer
         print('  Aggregating client updates...',flush=True)
         trace=server.update(model,states,sizes,excluded)
+        if cfg.diagnostic_every:
+            from .mechanism import summarize_diagnostics
+            trace['diagnostics']=summarize_diagnostics(diagnostic_samples)
         if cfg.method=='scaffold':
             for n in global_c: global_c[n]+=sum(u[n] for u in updates_c)/cfg.clients
         # Model payload, no protocol overhead; fixed frozen tensors also transmitted.
@@ -202,6 +215,9 @@ def run(cfg, resume=False):
               f'train={train_seconds:.1f}s | eval={eval_seconds:.1f}s | '
               f'mean loss={trace["loss"]:.4f}',flush=True)
         print(json.dumps({'method':cfg.method,'round':round_id+1,'dev':metrics,'server_lr':trace['server_lr']},ensure_ascii=False),flush=True)
+    if cfg.diagnostic_every:
+        from .mechanism import export
+        export(folder)
     return folder
 
 def main(default_method=None, argv=None):
@@ -212,6 +228,7 @@ def main(default_method=None, argv=None):
     p.add_argument('--rounds',type=int)
     p.add_argument('--batch-size',type=int)
     p.add_argument('--max-steps',type=int,help='Maximum steps per client per round; 0 means all batches')
+    p.add_argument('--diagnostic-every',type=int,help='Paired diagnostics every N client steps; 0 disables')
     p.add_argument('--participation',type=float)
     p.add_argument('--output',help='Results root; method and seed subdirectories are added automatically')
     p.add_argument('--resume',action='store_true')
@@ -225,7 +242,7 @@ def main(default_method=None, argv=None):
         if cfg.method=='scaffold':
             cfg.optimizer='sgd'; cfg.momentum=0.; cfg.weight_decay=0.; cfg.clip_grad=0.
             print('SCAFFOLD requires SGD: momentum=0, weight_decay=0, clip_grad=0. Use matched SGD for comparisons.',flush=True)
-    for name in ('seed','rounds','batch_size','max_steps','participation','output'):
+    for name in ('seed','rounds','batch_size','max_steps','diagnostic_every','participation','output'):
         value=getattr(a,name)
         if value is not None: setattr(cfg,name,value)
     cfg.validate()

@@ -1,11 +1,10 @@
-import copy
-import time
 import torch
 import torch.nn.functional as F
-from .backend import task_loss, optimizer_for
+from .backend import task_loss
 from .config import METHODS
 from .proximal import make_pairs, detection_discrepancy, sol_discrepancy
-from .state import params, buffers, restore_buffers, rng_state, restore_rng, grads, dot, conflict
+from .state import params, buffers, restore_buffers, rng_state, restore_rng, grads, dot
+from .diagnostics import paired_diagnostics
 
 def one_step(model, teacher, criterion, optimizer, images, targets, cfg,
              controls=None, diagnose=False):
@@ -17,6 +16,8 @@ def one_step(model, teacher, criterion, optimizer, images, targets, cfg,
     probe = rule in ('joint', 'joint_query', 'cls', 'box', 'l2', 'sol', 'sol_adaptive', 'sam')
     gp, pairs, teacher_out = None, None, None
     try:
+        if diagnose:
+            logs.update(paired_diagnostics(model,teacher,criterion,optimizer,images,targets,cfg))
         if probe or rule == 'direct':
             if rule == 'l2':
                 ref = dict(teacher.named_parameters())
@@ -50,27 +51,6 @@ def one_step(model, teacher, criterion, optimizer, images, targets, cfg,
         else:
             delta = {n: torch.zeros_like(p) for n, p in ps.items()}
 
-        # Diagnostics execute on independent model/optimizer copies and restore RNG.
-        if diagnose and gp is not None:
-            start = time.perf_counter()
-            baseline = copy.deepcopy(model)
-            baseline_opt = optimizer_for(baseline, cfg)
-            baseline_opt.load_state_dict(copy.deepcopy(optimizer.state_dict()))
-            baseline_opt.zero_grad(set_to_none=True)
-            loss0, _ = task_loss(baseline, criterion, images, targets)
-            loss0.backward()
-            g0 = {n: torch.zeros_like(p) if p.grad is None else p.grad.detach().clone() for n, p in params(baseline).items()}
-            if cfg.clip_grad > 0:
-                torch.nn.utils.clip_grad_norm_(baseline.parameters(), cfg.clip_grad)
-            baseline_opt.step()
-            u0 = {n: old[n]-p.detach() for n, p in params(baseline).items()}
-            logs.update(conflict_before=conflict(g0, gp), update_conflict_before=conflict(u0, gp), task_loss_before=loss0.item())
-            del baseline, baseline_opt
-            restore_rng(rng)
-            if images.is_cuda:
-                torch.cuda.synchronize()
-            logs['diagnostic_seconds'] = time.perf_counter()-start
-
         with torch.no_grad():
             for n, p in ps.items():
                 p.copy_(old[n]+delta[n])
@@ -90,10 +70,6 @@ def one_step(model, teacher, criterion, optimizer, images, targets, cfg,
                 if p.grad is None:
                     p.grad = torch.zeros_like(p)
                 p.grad.add_(global_c[n].to(p)-local_c[n].to(p))
-        if diagnose and gp is not None:
-            g1 = {n: torch.zeros_like(p) if p.grad is None else p.grad.detach() for n,p in ps.items()}
-            logs['conflict_after'] = conflict(g1, gp)
-            logs['delta_conflict'] = logs['conflict_after']-logs['conflict_before']
         # Restore exactly, before the single optimizer update. Task BN buffers stay.
         with torch.no_grad():
             for n, p in ps.items():
@@ -105,9 +81,6 @@ def one_step(model, teacher, criterion, optimizer, images, targets, cfg,
         if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in ps.values()):
             raise FloatingPointError('Nonfinite gradient')
         optimizer.step()
-        if diagnose and gp is not None:
-            u1 = {n: old[n]-p.detach() for n,p in ps.items()}
-            logs['update_conflict_after'] = conflict(u1, gp)
         logs['task_loss'] = loss.item()
         logs['objective'] = objective.item()
         return logs
